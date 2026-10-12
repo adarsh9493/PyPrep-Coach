@@ -3,13 +3,14 @@
  * ---------------------------------------------------------------------------
  * A small Express server that:
  *   1. Serves the static frontend from /public
- *   2. Generates Python interview questions with Claude  (POST /api/question)
- *   3. Validates your answer with Claude                   (POST /api/validate)
+ *   2. Generates Python interview questions with a free LLM  (POST /api/question)
+ *   3. Validates your answer with a free LLM                  (POST /api/validate)
  *   4. Persists your progress to a local progress.json
  *
- * The ANTHROPIC_API_KEY is read here on the server and is NEVER sent to the
- * browser. If no key is configured, the app still works using the bundled
- * seed questions and a rule-based fallback tutor.
+ * The LLM API key is read here on the server and is NEVER sent to the browser.
+ * It talks to any OpenAI-compatible provider (Google Gemini, Groq, OpenRouter,
+ * or a local Ollama). If no provider is configured, the app still works using
+ * the bundled seed questions and a rule-based fallback tutor.
  */
 
 'use strict';
@@ -23,9 +24,53 @@ require('dotenv').config({ quiet: true }); // loads variables from .env into pro
 // Configuration
 // ---------------------------------------------------------------------------
 const PORT = process.env.PORT || 3000;
-const API_KEY = process.env.ANTHROPIC_API_KEY;
-const MODEL = process.env.ANTHROPIC_MODEL || 'claude-sonnet-5-5';
-const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
+
+/**
+ * Free, OpenAI-compatible providers. Every one of these exposes the same
+ * "/chat/completions" API, so a single client can talk to all of them.
+ * Pick one with LLM_PROVIDER in .env (defaults to Gemini's generous free tier).
+ */
+const PROVIDERS = {
+  gemini: {
+    baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    model: 'gemini-2.0-flash',
+    requiresKey: true,
+    label: 'Google Gemini (free tier)'
+  },
+  groq: {
+    baseUrl: 'https://api.groq.com/openai/v1',
+    model: 'llama-3.3-70b-versatile',
+    requiresKey: true,
+    label: 'Groq (free tier)'
+  },
+  openrouter: {
+    baseUrl: 'https://openrouter.ai/api/v1',
+    model: 'meta-llama/llama-3.3-70b-instruct:free',
+    requiresKey: true,
+    label: 'OpenRouter (free models)'
+  },
+  ollama: {
+    baseUrl: 'http://localhost:11434/v1',
+    model: 'llama3.2',
+    requiresKey: false, // Ollama runs locally and needs no key
+    label: 'Ollama (local, no key)'
+  }
+};
+
+/** Resolve the active provider config from environment variables. */
+function llmConfig() {
+  const name = (process.env.LLM_PROVIDER || 'gemini').toLowerCase();
+  const preset = PROVIDERS[name] || PROVIDERS.gemini;
+  const apiKey = process.env.LLM_API_KEY || '';
+  return {
+    name,
+    baseUrl: (process.env.LLM_BASE_URL || preset.baseUrl).replace(/\/$/, ''),
+    model: process.env.LLM_MODEL || preset.model,
+    apiKey,
+    label: preset.label,
+    enabled: preset.requiresKey ? Boolean(apiKey) : true
+  };
+}
 
 const ROOT = __dirname;
 const PROGRESS_FILE = path.join(ROOT, 'progress.json');
@@ -271,44 +316,43 @@ try {
 }
 
 // ---------------------------------------------------------------------------
-// Claude API wrapper
+// LLM API wrapper (OpenAI-compatible: Gemini / Groq / OpenRouter / Ollama)
 // ---------------------------------------------------------------------------
 
 /**
- * Call the Anthropic Messages API.
+ * Call the configured OpenAI-compatible chat completions endpoint.
  * @returns {Promise<string>} the assistant's text response
- * @throws if no key is set or the request fails
+ * @throws if the provider is not configured or the request fails
  */
-async function callClaude({ system, messages, maxTokens = 1500 }) {
-  if (!API_KEY) throw new Error('NO_API_KEY');
+async function callLLM({ system, messages, maxTokens = 1500 }) {
+  const cfg = llmConfig();
+  if (!cfg.enabled) throw new Error('NO_API_KEY');
 
-  const res = await fetch(ANTHROPIC_URL, {
+  const res = await fetch(`${cfg.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      'x-api-key': API_KEY,
-      'anthropic-version': '2023-06-01'
+      // Ollama needs no key; the others use a bearer token.
+      ...(cfg.apiKey ? { authorization: `Bearer ${cfg.apiKey}` } : {})
     },
     body: JSON.stringify({
-      model: MODEL,
+      model: cfg.model,
+      temperature: 0.7,
       max_tokens: maxTokens,
-      system,
-      messages,
-      temperature: 0.7
+      messages: [{ role: 'system', content: system }, ...messages]
     })
   });
 
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
-    throw new Error(`Anthropic API ${res.status}: ${detail.slice(0, 400)}`);
+    throw new Error(`${cfg.label} ${res.status}: ${detail.slice(0, 400)}`);
   }
 
   const data = await res.json();
-  const text = (data.content || [])
-    .filter((block) => block.type === 'text')
-    .map((block) => block.text)
-    .join('\n');
-  if (!text) throw new Error('Anthropic returned an empty response');
+  const text = data.choices && data.choices[0] && data.choices[0].message
+    ? data.choices[0].message.content
+    : '';
+  if (!text) throw new Error(`${cfg.label} returned an empty response`);
   return text;
 }
 
@@ -332,7 +376,7 @@ const QUESTION_SCHEMA_HINT = `Return ONLY a JSON object (no markdown, no comment
 }`;
 
 /**
- * Ask Claude for a new question, avoiding ones already seen.
+ * Ask the LLM for a new question, avoiding ones already seen.
  * Falls back to a seed question if the AI call fails.
  */
 async function generateQuestion({ topic, difficulty, progress }) {
@@ -356,7 +400,7 @@ async function generateQuestion({ topic, difficulty, progress }) {
     `not matter.\n\n` +
     QUESTION_SCHEMA_HINT;
 
-  const text = await callClaude({
+  const text = await callLLM({
     system,
     messages: [{ role: 'user', content: user }],
     maxTokens: 1800
@@ -466,8 +510,8 @@ function describeExecution(execution) {
   );
 }
 
-/** Ask Claude to evaluate the learner's code. */
-async function validateWithClaude({ question, code, execution }) {
+/** Ask the LLM to evaluate the learner's code. */
+async function validateWithLLM({ question, code, execution }) {
   const executionIsTrustworthy = execution && execution.ran;
   const user =
     `Here is a Python interview question:\n\n${describeQuestion(question)}\n\n` +
@@ -480,7 +524,7 @@ async function validateWithClaude({ question, code, execution }) {
     'Evaluate the code against the question. Be specific and kind.\n\n' +
     FEEDBACK_SCHEMA_HINT;
 
-  const text = await callClaude({
+  const text = await callLLM({
     system: VALIDATOR_SYSTEM,
     messages: [{ role: 'user', content: user }],
     maxTokens: 1500
@@ -543,7 +587,7 @@ function fallbackFeedback({ question, code, execution, reason }) {
 
   const failed = ran ? (execution.details || []).filter((d) => !d.passed) : [];
   const note = reason === 'NO_API_KEY'
-    ? 'The AI tutor is offline (no ANTHROPIC_API_KEY configured), so this verdict comes from running your code against the test cases.'
+    ? 'The AI tutor is offline (no LLM API key configured), so this verdict comes from running your code against the test cases.'
     : `The AI tutor could not be reached (${reason}). This verdict comes from running your code against the test cases.`;
 
   return {
@@ -590,10 +634,12 @@ app.use(express.static(path.join(ROOT, 'public')));
 
 /** Health check - handy for verifying the server is up. */
 app.get('/api/health', (_req, res) => {
+  const cfg = llmConfig();
   res.json({
     ok: true,
-    aiEnabled: Boolean(API_KEY),
-    model: MODEL,
+    aiEnabled: cfg.enabled,
+    provider: cfg.name,
+    model: cfg.model,
     seedQuestions: SEED_QUESTIONS.length
   });
 });
@@ -655,7 +701,7 @@ app.post('/api/question', async (req, res) => {
   }
 
   // Try the AI first, fall back to seeds.
-  if (API_KEY) {
+  if (llmConfig().enabled) {
     try {
       const question = await generateQuestion({ topic, difficulty, progress });
       return res.json({ question, source: 'ai' });
@@ -683,9 +729,9 @@ app.post('/api/validate', async (req, res) => {
 
   let feedback;
   let source = 'ai';
-  if (API_KEY) {
+  if (llmConfig().enabled) {
     try {
-      feedback = await validateWithClaude({ question, code, execution });
+      feedback = await validateWithLLM({ question, code, execution });
     } catch (err) {
       console.warn('[validate] AI validation failed, using fallback tutor:', err.message);
       feedback = fallbackFeedback({ question, code, execution, reason: err.message });
@@ -701,7 +747,7 @@ app.post('/api/validate', async (req, res) => {
   const before = progress.xp;
   applyAttempt(progress, { question, verdict: feedback.verdict, isMock: !!mock });
 
-  // Accumulate a "topics to brush up" list from concepts Claude flagged.
+  // Accumulate a "topics to brush up" list from concepts the tutor flagged.
   for (const c of feedback.concepts_to_review || []) {
     if (!c.concept) continue;
     const exists = progress.topicsToBrushUp.some((t) => t.concept === c.concept);
@@ -770,11 +816,14 @@ app.post('/api/mock/report', (req, res) => {
 // Start
 // ---------------------------------------------------------------------------
 const server = app.listen(PORT, () => {
+  const cfg = llmConfig();
   console.log('');
   console.log('  PyPrep Coach is running');
   console.log(`  ->  http://localhost:${PORT}`);
-  console.log(`  AI tutor: ${API_KEY ? `enabled (model: ${MODEL})` : 'OFFLINE - using seed questions + rule-based tutor'}`);
-  console.log('  (Add ANTHROPIC_API_KEY to .env to enable the AI tutor.)');
+  console.log(
+    `  AI tutor: ${cfg.enabled ? `enabled - ${cfg.label} (${cfg.model})` : 'OFFLINE - using seed questions + rule-based tutor'}`
+  );
+  console.log('  (Set LLM_PROVIDER and LLM_API_KEY in .env to enable the AI tutor.)');
   console.log('');
 });
 
