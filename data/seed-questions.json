@@ -1,0 +1,106 @@
+[
+  {
+    "id": "seed-is-palindrome",
+    "title": "Valid Palindrome",
+    "topic": "strings",
+    "difficulty": "Easy",
+    "statement": "Given a string s, return True if it is a palindrome considering only alphanumeric characters and ignoring case, otherwise return False. A palindrome reads the same forwards and backwards.",
+    "examples": [
+      { "input": "s = \"A man, a plan, a canal: Panama\"", "output": "True" },
+      { "input": "s = \"race a car\"", "output": "False" }
+    ],
+    "functionName": "is_palindrome",
+    "starterCode": "def is_palindrome(s: str) -> bool:\n    # TODO: clean the string, then compare it to its reverse.\n    pass\n",
+    "hint": "Two pointers are the classic approach, but for Python the cleanest trick is to build a filtered string and compare it with its reverse.",
+    "solution": "def is_palindrome(s: str) -> bool:\n    cleaned = [ch.lower() for ch in s if ch.isalnum()]\n    return cleaned == cleaned[::-1]\n",
+    "testCases": [
+      { "args": ["A man, a plan, a canal: Panama"], "expected": true },
+      { "args": ["race a car"], "expected": false },
+      { "args": [""], "expected": true },
+      { "args": ["0P"], "expected": false },
+      { "args": ["No 'x' in Nixon"], "expected": true }
+    ]
+  },
+  {
+    "id": "seed-two-sum",
+    "title": "Two Sum",
+    "topic": "lists_dicts_sets",
+    "difficulty": "Easy",
+    "statement": "Given a list of integers nums and an integer target, return the indices of the two numbers that add up to target. You may assume each input has exactly one solution and you may not use the same element twice. Return the indices in any order.",
+    "examples": [
+      { "input": "nums = [2, 7, 11, 15], target = 9", "output": "[0, 1]" },
+      { "input": "nums = [3, 2, 4], target = 6", "output": "[1, 2]" }
+    ],
+    "functionName": "two_sum",
+    "starterCode": "def two_sum(nums: list, target: int) -> list:\n    # TODO: use a dict to remember numbers you have already seen.\n    pass\n",
+    "hint": "Instead of a nested loop (O(n^2)), store each number's index in a dictionary. For each new number, check whether target - number is already in the dict.",
+    "solution": "def two_sum(nums: list, target: int) -> list:\n    seen = {}\n    for i, n in enumerate(nums):\n        complement = target - n\n        if complement in seen:\n            return [seen[complement], i]\n        seen[n] = i\n    return []\n",
+    "testCases": [
+      { "args": [[2, 7, 11, 15], 9], "expected": [0, 1], "unordered": true },
+      { "args": [[3, 2, 4], 6], "expected": [1, 2], "unordered": true },
+      { "args": [[3, 3], 6], "expected": [0, 1], "unordered": true },
+      { "args": [[1, 2, 3], 7], "expected": [], "unordered": true }
+    ]
+  },
+  {
+    "id": "seed-flatten",
+    "title": "Flatten a Nested List",
+    "topic": "comprehensions",
+    "difficulty": "Medium",
+    "statement": "Given a nested list of integers (lists can be nested to any depth), return a single flattened list containing all the integers in their original order.",
+    "examples": [
+      { "input": "nested = [[1, 2, [3]], 4]", "output": "[1, 2, 3, 4]" },
+      { "input": "nested = [[[[1]]]]", "output": "[1]" }
+    ],
+    "functionName": "flatten",
+    "starterCode": "def flatten(nested: list) -> list:\n    # TODO: recurse into sublists and collect the integers.\n    pass\n",
+    "hint": "Recursion is natural here: for each element, if it is a list, extend with flatten(element); otherwise append it.",
+    "solution": "def flatten(nested: list) -> list:\n    result = []\n    for item in nested:\n        if isinstance(item, list):\n            result.extend(flatten(item))\n        else:\n            result.append(item)\n    return result\n",
+    "testCases": [
+      { "args": [[[1, 2, [3]], 4]], "expected": [1, 2, 3, 4] },
+      { "args": [[]], "expected": [] },
+      { "args": [[[[1]]]], "expected": [1] },
+      { "args": [[1, [2, [3, [4, [5]]]]]], "expected": [1, 2, 3, 4, 5] }
+    ]
+  },
+  {
+    "id": "seed-fibonacci",
+    "title": "Nth Fibonacci Number",
+    "topic": "recursion",
+    "difficulty": "Medium",
+    "statement": "Write a function fib(n) that returns the nth Fibonacci number, where fib(0) = 0 and fib(1) = 1. Try to make it efficient for larger n.",
+    "examples": [
+      { "input": "n = 10", "output": "55" },
+      { "input": "n = 0", "output": "0" }
+    ],
+    "functionName": "fib",
+    "starterCode": "def fib(n: int) -> int:\n    # TODO: naive recursion is exponential - can you do it in O(n)?\n    pass\n",
+    "hint": "Naive recursion recomputes the same values. Either keep two running values in a loop, or memoize with a dictionary / functools.lru_cache.",
+    "solution": "def fib(n: int) -> int:\n    a, b = 0, 1\n    for _ in range(n):\n        a, b = b, a + b\n    return a\n",
+    "testCases": [
+      { "args": [0], "expected": 0 },
+      { "args": [1], "expected": 1 },
+      { "args": [10], "expected": 55 },
+      { "args": [20], "expected": 6765 }
+    ]
+  },
+  {
+    "id": "seed-group-anagrams",
+    "title": "Group Anagrams",
+    "topic": "lists_dicts_sets",
+    "difficulty": "Hard",
+    "statement": "Given a list of strings words, group the anagrams together. Two words are anagrams if they contain the same letters in a different order. Return the groups in any order.",
+    "examples": [
+      { "input": "words = [\"eat\", \"tea\", \"tan\", \"ate\", \"nat\", \"bat\"]", "output": "[[\"eat\", \"tea\", \"ate\"], [\"tan\", \"nat\"], [\"bat\"]]" }
+    ],
+    "functionName": "group_anagrams",
+    "starterCode": "def group_anagrams(words: list) -> list:\n    # TODO: two anagrams share the same sorted letters - use that as a key.\n    pass\n",
+    "hint": "Use the sorted letters of each word as a dictionary key, then collect words into the matching bucket.",
+    "solution": "def group_anagrams(words: list) -> list:\n    groups = {}\n    for word in words:\n        key = ''.join(sorted(word))\n        groups.setdefault(key, []).append(word)\n    return list(groups.values())\n",
+    "testCases": [
+      { "args": [["eat", "tea", "tan", "ate", "nat", "bat"]], "expected": [["eat", "tea", "ate"], ["tan", "nat"], ["bat"]], "unordered": true },
+      { "args": [[""]], "expected": [[""]], "unordered": true },
+      { "args": [["a"]], "expected": [["a"]], "unordered": true }
+    ]
+  }
+]

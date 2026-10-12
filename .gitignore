@@ -1,0 +1,22 @@
+# Secrets - NEVER commit your API key
+.env
+
+# Dependencies
+node_modules/
+
+# Local progress data (your personal stats survive browser changes,
+# but should not be committed to git)
+progress.json
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Playwright test artifacts
+.playwright-mcp/
+
+# Logs
+npm-debug.log*
+*.log

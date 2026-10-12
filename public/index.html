@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PyPrep Coach - Python Interview Trainer</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%90%8D%3C/text%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+    <!-- Monaco editor loader (loaded from CDN). If it fails we fall back to a textarea. -->
+    <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js"></script>
+  </head>
+  <body>
+    <!-- ======================= Top bar ======================= -->
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-emoji">🐍</span>
+        <span>PyPrep <strong>Coach</strong></span>
+      </div>
+
+      <div class="stats">
+        <div class="stat" title="Your level and XP progress">
+          <span class="stat-label">Level <b id="levelNum">1</b></span>
+          <div class="xp-bar"><div class="xp-fill" id="xpFill"></div></div>
+          <span class="stat-sub"><b id="xpNum">0</b> XP</span>
+        </div>
+        <div class="stat" title="Consecutive days practised">
+          <span class="stat-emoji">🔥</span>
+          <span class="stat-label"><b id="streakNum">0</b>-day streak</span>
+        </div>
+        <div class="stat" title="Questions you have fully solved">
+          <span class="stat-emoji">✅</span>
+          <span class="stat-label"><b id="solvedNum">0</b> solved</span>
+        </div>
+      </div>
+
+      <div class="controls">
+        <button class="btn btn-ghost" id="mockBtn" title="Start a timed mock interview">⏱ Mock</button>
+        <button class="btn btn-ghost" id="dashBtn" title="Open your progress dashboard">📊 Dashboard</button>
+        <button class="btn btn-ghost" id="confettiToggle" title="Toggle confetti celebration">🎉 On</button>
+        <button class="btn btn-ghost" id="themeToggle" title="Switch light / dark mode">🌙</button>
+      </div>
+    </header>
+
+    <!-- ======================= Mock interview banner ======================= -->
+    <div class="mock-banner hidden" id="mockBanner">
+      <span>⏱ <strong>Mock interview</strong></span>
+      <span id="mockProgress">Question 1 of 5</span>
+      <span id="mockTimer" class="mock-timer">30:00</span>
+      <button class="btn btn-small" id="mockQuit">End early</button>
+    </div>
+
+    <!-- ======================= Picker ======================= -->
+    <section class="picker">
+      <label class="field">
+        <span>Topic</span>
+        <select id="topicSelect"></select>
+      </label>
+      <label class="field">
+        <span>Difficulty</span>
+        <select id="difficultySelect">
+          <option value="Easy">Easy</option>
+          <option value="Medium">Medium</option>
+          <option value="Hard">Hard</option>
+          <option value="adaptive">Adaptive (auto)</option>
+        </select>
+      </label>
+      <button class="btn btn-primary" id="newQuestionBtn">✨ New question</button>
+      <button class="btn btn-ghost" id="surpriseBtn" title="Pick topic and difficulty for me">🎲 Surprise me</button>
+    </section>
+
+    <!-- ======================= Workspace ======================= -->
+    <main class="workspace">
+      <!-- Left: the question -->
+      <section class="pane question-pane">
+        <div class="pane-head">
+          <span class="pill" id="qDifficulty">—</span>
+          <span class="pill pill-topic" id="qTopic">—</span>
+          <span class="pill pill-source hidden" id="qSource">seed</span>
+        </div>
+        <h1 class="q-title" id="qTitle">Loading your first question…</h1>
+
+        <div class="statement" id="qStatement"></div>
+
+        <div class="examples" id="qExamples"></div>
+
+        <div class="hint-box hidden" id="hintBox">
+          <strong>💡 Hint</strong>
+          <p id="hintText"></p>
+        </div>
+
+        <div class="solution-box hidden" id="solutionBox">
+          <strong>✅ Reference solution</strong>
+          <pre id="solutionText"></pre>
+        </div>
+      </section>
+
+      <!-- Right: the editor -->
+      <section class="pane editor-pane">
+        <div class="editor-head">
+          <span>Your solution</span>
+          <span class="editor-hint">Ctrl/Cmd + Enter to validate</span>
+        </div>
+        <div id="editor" class="editor"></div>
+        <!-- Fallback if Monaco can't load -->
+        <textarea id="editorFallback" class="editor-fallback hidden" spellcheck="false"></textarea>
+
+        <div class="exec-status" id="execStatus"></div>
+
+        <div class="editor-actions">
+          <button class="btn btn-primary" id="validateBtn">▶ Validate</button>
+          <button class="btn btn-ghost" id="hintBtn">💡 Show hint</button>
+          <button class="btn btn-ghost" id="solutionBtn">👀 Show solution</button>
+          <button class="btn btn-ghost" id="tryAgainBtn">↻ Try again</button>
+          <button class="btn btn-ghost" id="nextBtn">Next ➜</button>
+        </div>
+      </section>
+    </main>
+
+    <!-- ======================= Feedback ======================= -->
+    <section class="feedback" id="feedbackPanel">
+      <div class="feedback-empty" id="feedbackEmpty">
+        Write your solution and hit <strong>Validate</strong>. Your AI coach's feedback will appear here.
+      </div>
+      <div id="feedbackContent" class="hidden"></div>
+    </section>
+
+    <!-- ======================= Dashboard modal ======================= -->
+    <div class="modal-overlay hidden" id="dashModal">
+      <div class="modal">
+        <div class="modal-head">
+          <h2>📊 Your progress</h2>
+          <button class="btn btn-ghost" id="dashClose">✕</button>
+        </div>
+        <div class="modal-body" id="dashBody"></div>
+        <div class="modal-foot">
+          <button class="btn btn-danger" id="resetBtn">Reset progress</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Toast for friendly errors -->
+    <div class="toast hidden" id="toast"></div>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
