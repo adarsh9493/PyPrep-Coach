@@ -57,6 +57,7 @@ const state = {
   level: null,
   question: null,
   validating: false,
+  combo: 0, // consecutive correct answers in this session
   pyodide: null, // resolved Pyodide instance
   pyodideFailed: false,
   editor: null, // Monaco instance (if loaded)
@@ -352,7 +353,9 @@ function renderQuestion(q) {
 function resetFeedback() {
   $('feedbackEmpty').classList.remove('hidden');
   $('feedbackEmpty').innerHTML =
-    'Write your solution and hit <strong>Validate</strong>. Your AI coach\'s feedback will appear here.';
+    '<div class="empty-emoji">🤖</div>' +
+    '<div>Write your solution, then hit <strong>Validate</strong>.</div>' +
+    '<div class="empty-sub">Your AI coach\'s feedback will land right here.</div>';
   const content = $('feedbackContent');
   content.classList.add('hidden');
   content.innerHTML = '';
@@ -436,7 +439,16 @@ async function validate() {
 
     state.progress = data.progress;
     state.level = data.level;
+
+    // Update the combo counter, then refresh the HUD.
+    if (data.feedback.verdict === 'correct') {
+      state.combo = (state.combo || 0) + 1;
+    } else {
+      state.combo = 0;
+    }
     renderProgressHeader();
+    if (data.xpAwarded > 0) pulseLevelChip();
+
     renderFeedback(data.feedback, data.xpAwarded, data.source);
 
     if (data.feedback.verdict === 'correct' && confettiEnabled()) {
@@ -542,12 +554,39 @@ function renderProgressHeader() {
   if (!state.level || !state.progress) return;
   $('levelNum').textContent = state.level.level;
   $('xpNum').textContent = state.progress.xp;
-  $('xpFill').style.width = `${state.level.progressPct}%`;
+  const pct = Math.max(0, Math.min(100, state.level.progressPct || 0));
+  $('xpFill').style.width = `${pct}%`;
   $('streakNum').textContent = state.progress.streak?.count || 0;
   $('solvedNum').textContent = solvedCount();
 
+  // Animate the circular level ring (r = 20 -> circumference ~= 125.66).
+  const ring = $('levelRing');
+  if (ring) {
+    const C = 2 * Math.PI * 20;
+    ring.style.strokeDashoffset = (C * (1 - pct / 100)).toFixed(1);
+  }
+
+  // Combo pill (shown once you have 2+ correct answers in a row).
+  const combo = state.combo || 0;
+  const pill = $('comboPill');
+  if (combo >= 2) {
+    pill.classList.remove('hidden');
+    $('comboNum').textContent = combo;
+  } else {
+    pill.classList.add('hidden');
+  }
+
   const confetti = state.progress.settings?.confetti !== false;
-  $('confettiToggle').textContent = confetti ? '🎉 On' : '🎉 Off';
+  $('confettiLabel').textContent = confetti ? 'On' : 'Off';
+}
+
+/** Briefly pulse the level chip to celebrate an XP gain. */
+function pulseLevelChip() {
+  const chip = $('levelChip');
+  if (!chip) return;
+  chip.classList.remove('pop');
+  void chip.offsetWidth; // restart the animation
+  chip.classList.add('pop');
 }
 
 function confettiEnabled() {
