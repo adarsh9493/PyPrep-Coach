@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="light">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>PyPrep Coach - Python Interview Trainer</title>
+    <title>Python Coach and Practice - Python Interview Trainer</title>
     <link
       rel="icon"
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%90%8D%3C/text%3E%3C/svg%3E"
@@ -32,8 +32,7 @@
       <div class="brand">
         <div class="brand-mark">🐍</div>
         <div class="brand-text">
-          <span>PyPrep</span>
-          <strong>Coach</strong>
+          <strong>Python Coach and Practice</strong>
         </div>
       </div>
 
@@ -65,6 +64,9 @@
       </div>
 
       <div class="hud-actions">
+        <button class="icon-btn" id="chatBtn" title="Ask your Python coach anything - perfect if you have forgotten the topics">
+          <span class="ico">💬</span><span class="lbl">Chat</span>
+        </button>
         <button class="icon-btn" id="mockBtn" title="Start a timed mock interview">
           <span class="ico">⏱</span><span class="lbl">Mock</span>
         </button>
@@ -105,6 +107,20 @@
       <button class="btn btn-ghost btn-lg" id="surpriseBtn">🎲 Surprise me</button>
     </section>
 
+    <!-- ===================== Ask the coach bar ===================== -->
+    <section class="ask-bar" aria-label="Ask your Python coach a question">
+      <form id="askForm" class="ask-form">
+        <span class="ask-emoji" aria-hidden="true">💬</span>
+        <input
+          id="askInput"
+          type="text"
+          autocomplete="off"
+          placeholder="Stuck or forgot a concept? Ask your coach… e.g. &quot;Explain decorators simply&quot;"
+        />
+        <button class="btn btn-primary" type="submit" id="askBtn">Ask question</button>
+      </form>
+    </section>
+
     <!-- ======================== Workspace ======================== -->
     <main class="workspace">
       <!-- Question -->
@@ -117,6 +133,15 @@
         <h1 class="q-title" id="qTitle">Loading your first question…</h1>
         <div class="statement" id="qStatement"></div>
         <div class="examples" id="qExamples"></div>
+
+      <div class="concept-explainer" id="conceptExplainer">
+        <button class="concept-toggle" id="conceptToggle" aria-expanded="false">
+          <span class="concept-title">🧠 Concepts in this question</span>
+          <span class="concept-source" id="conceptSource"></span>
+          <span class="chev">›</span>
+        </button>
+        <div class="concept-body" id="conceptBody"></div>
+      </div>
 
         <div class="hint-box hidden" id="hintBox">
           <strong>💡 Hint</strong>
@@ -174,6 +199,35 @@
         </div>
       </div>
     </div>
+
+    <!-- ==================== Tutor chat widget ==================== -->
+    <section class="chat-panel hidden" id="chatPanel" aria-label="Ask your Python coach">
+      <div class="chat-head">
+        <div class="chat-title">
+          <span class="chat-avatar">🧑🏫</span>
+          <div>
+            <strong>Ask your Python coach</strong>
+            <span class="chat-sub" id="chatSub">Explain anything, get step by step coaching</span>
+          </div>
+        </div>
+        <div class="chat-head-actions">
+          <button class="icon-btn chat-icon" id="chatNewChat" title="Start a new chat">🗒</button>
+          <button class="icon-btn chat-icon" id="chatClose" title="Close chat">✕</button>
+        </div>
+      </div>
+
+      <div class="chat-body" id="chatBody"></div>
+      <div class="chat-suggest" id="chatSuggest"></div>
+
+      <form class="chat-input-row" id="chatForm">
+        <textarea
+          id="chatInput"
+          rows="1"
+          placeholder="Ask anything… e.g. &quot;Explain list comprehensions step by step&quot;"
+        ></textarea>
+        <button class="btn btn-primary" type="submit" id="chatSend">Send</button>
+      </form>
+    </section>
 
     <div class="toast hidden" id="toast"></div>
 

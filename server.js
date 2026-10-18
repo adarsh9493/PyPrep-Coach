@@ -33,7 +33,10 @@ const PORT = process.env.PORT || 3000;
 const PROVIDERS = {
   gemini: {
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
-    model: 'gemini-2.0-flash',
+    // A rolling "latest" alias so the default never points at a retired model.
+    model: 'gemini-flash-latest',
+    // If a model is overloaded (503) or retired/blocked (404), try these next.
+    fallbackModels: ['gemini-3.8-flash', 'gemini-3-flash-preview', 'gemini-3.5-flash'],
     requiresKey: true,
     label: 'Google Gemini (free tier)'
   },
@@ -66,6 +69,7 @@ function llmConfig() {
     name,
     baseUrl: (process.env.LLM_BASE_URL || preset.baseUrl).replace(/\/$/, ''),
     model: process.env.LLM_MODEL || preset.model,
+    fallbackModels: preset.fallbackModels || [],
     apiKey,
     label: preset.label,
     enabled: preset.requiresKey ? Boolean(apiKey) : true
@@ -328,32 +332,62 @@ async function callLLM({ system, messages, maxTokens = 1500 }) {
   const cfg = llmConfig();
   if (!cfg.enabled) throw new Error('NO_API_KEY');
 
-  const res = await fetch(`${cfg.baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      // Ollama needs no key; the others use a bearer token.
-      ...(cfg.apiKey ? { authorization: `Bearer ${cfg.apiKey}` } : {})
-    },
-    body: JSON.stringify({
-      model: cfg.model,
-      temperature: 0.7,
-      max_tokens: maxTokens,
-      messages: [{ role: 'system', content: system }, ...messages]
-    })
-  });
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const models = [cfg.model, ...(cfg.fallbackModels || [])];
+  let lastError = null;
 
-  if (!res.ok) {
-    const detail = await res.text().catch(() => '');
-    throw new Error(`${cfg.label} ${res.status}: ${detail.slice(0, 400)}`);
+  // Try each model in the chain. Transient overloads (429/503) get one brief
+  // retry; retired models (404) move straight to the next fallback.
+  for (const model of models) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let res;
+      try {
+        res = await fetch(`${cfg.baseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            // Ollama needs no key; the others use a bearer token.
+            ...(cfg.apiKey ? { authorization: `Bearer ${cfg.apiKey}` } : {})
+          },
+          body: JSON.stringify({
+            model,
+            temperature: 0.7,
+            max_tokens: maxTokens,
+            messages: [{ role: 'system', content: system }, ...messages]
+          })
+        });
+      } catch (netErr) {
+        // Network-level failure (offline, DNS, proxy). Surface it immediately.
+        throw netErr;
+      }
+
+      if (res.ok) {
+        const data = await res.json().catch(() => null);
+        const text = data && data.choices && data.choices[0] && data.choices[0].message
+          ? data.choices[0].message.content
+          : '';
+        if (!text) throw new Error(`${cfg.label} returned an empty response`);
+        return text;
+      }
+
+      const detail = await res.text().catch(() => '');
+      lastError = new Error(`${cfg.label} ${res.status}: ${detail.slice(0, 400)}`);
+
+      if (res.status === 429 || res.status === 503) {
+        // Temporary overload / rate limit - pause, retry once, else next model.
+        await sleep(1200);
+        continue;
+      }
+      if (res.status === 404) {
+        // Model unknown or retired - try the next fallback model.
+        break;
+      }
+      // Any other error (400, 401, 403, 500...) is not worth looping over.
+      throw lastError;
+    }
   }
 
-  const data = await res.json();
-  const text = data.choices && data.choices[0] && data.choices[0].message
-    ? data.choices[0].message.content
-    : '';
-  if (!text) throw new Error(`${cfg.label} returned an empty response`);
-  return text;
+  throw lastError || new Error(`${cfg.label} request failed after trying all model fallbacks`);
 }
 
 // ---------------------------------------------------------------------------
@@ -626,6 +660,404 @@ function fallbackFeedback({ question, code, execution, reason }) {
 }
 
 // ---------------------------------------------------------------------------
+// Free-form tutor chat (POST /api/chat)
+// ---------------------------------------------------------------------------
+
+const CHAT_SYSTEM =
+  'You are a warm, patient senior Python engineer coaching a friend for ' +
+  'interviews. Keep answers focused and practical: prefer short paragraphs and ' +
+  'tight bullet lists over walls of text, and use fenced code blocks for code. ' +
+  'When the learner is stuck on the question they are currently working on, ' +
+  'nudge them toward the idea instead of dumping the full answer. Assume no ' +
+  'question is too basic and never make them feel silly for asking. Explain concepts ' +
+  'step by step in plain English, with small examples if helpful.';
+
+/**
+ * A built-in cheat sheet so the chat is still genuinely useful with no API key
+ * (which is exactly when "I forgot everything" happens). Keyed by topic.
+ */
+const OFFLINE_CHAT_NOTES = {
+  basics: [
+    '**Basics refresher**',
+    '- Core types: `int`, `float`, `str`, `bool`, `None`, `list`, `tuple`, `dict`, `set`.',
+    '- Falsy values: `0`, `0.0`, `""`, `[]`, `{}`, `set()`, `None`.',
+    '- `==` compares values; `is` compares identity (`x is None`).',
+    '- Operators: `//` floor divide, `/` true divide, `%` modulo, `**` power.',
+    "- F-strings: `f'{name}: {price:.2f}'`.",
+    '- Swap without a temp: `a, b = b, a`.'
+  ].join('\n'),
+
+  strings: [
+    '**Strings refresher**',
+    '- Strings are immutable: every change returns a NEW string.',
+    '- Slicing: `s[::-1]` reverses; `s[start:stop:step]`.',
+    "- Handy: `s.lower()`, `s.strip()`, `s.split(',')`, `','.join(parts)`, `s.replace(a, b)`, `s.startswith(x)`.",
+    '- Checks: `s.isdigit()`, `s.isalpha()`.',
+    '- Counting with a dict: `counts[c] = counts.get(c, 0) + 1` (or `collections.Counter`).'
+  ].join('\n'),
+
+  lists_dicts_sets: [
+    '**Lists / dicts / sets refresher**',
+    '- `list`: ordered, mutable, duplicates allowed. `append`, `extend`, `insert`, `pop`; `l.sort()` (in place) vs `sorted(l)` (new list).',
+    '- `tuple`: ordered and immutable, so it is hashable and usable as a dict key.',
+    '- `dict`: key -> value; keys must be hashable. `d.get(k, default)`, `d.items()`, `d.keys()`, `d.values()`.',
+    '- `set`: unique items with O(1) membership - great for de-duping and "seen before?" checks.',
+    '- Big-O to know: list index `O(1)`, `x in list` `O(n)`, `x in set/dict` `O(1)`, `append` amortized `O(1)`.'
+  ].join('\n'),
+
+  comprehensions: [
+    '**Comprehensions refresher**',
+    '- List: `[x * 2 for x in nums]`',
+    '- Filter: `[x for x in nums if x % 2 == 0]`',
+    '- Filter + transform: `[x * x for x in nums if x > 0]`',
+    '- Dict: `{k: v for k, v in pairs}`; Set: `{x for x in nums}`',
+    '- Nested: `[n for row in matrix for n in row]` (outer loop comes first).',
+    '- Generator form (lazy, builds nothing): `sum(x * x for x in nums)`. Use it for large data.'
+  ].join('\n'),
+
+  functions_closures: [
+    '**Functions & closures refresher**',
+    '- Default args: `def f(x, y=0)`. Never use a mutable default (see gotchas).',
+    '- `*args` = extra positional args, `**kwargs` = extra keyword args.',
+    '- A closure is a function that remembers variables from where it was defined.',
+    '- Late-binding trap: lambdas created in a loop all capture the LAST value. Fix with `lambda x=x: x`.',
+    '- `functools.lru_cache` memoizes a function in one line.'
+  ].join('\n'),
+
+  oop: [
+    '**OOP refresher**',
+    '- `class Dog:` with `def __init__(self, name): self.name = name`.',
+    "- `super().__init__(...)` runs the parent's initializer.",
+    '- Dunders to know: `__init__`, `__repr__` (debug view), `__eq__`, `__len__`, `__iter__`.',
+    '- `@staticmethod` needs no `self`; `@classmethod` receives `cls`.',
+    '- Interview favourite: `__repr__` vs `__str__`, and composition over inheritance.'
+  ].join('\n'),
+
+  decorators: [
+    '**Decorators refresher**',
+    '- A decorator is a function that takes a function and returns a (usually wrapped) function.',
+    '- Minimal version:',
+    '```python',
+    'def logged(fn):',
+    '    def wrapper(*args, **kwargs):',
+    "        print('calling', fn.__name__)",
+    '        return fn(*args, **kwargs)',
+    '    return wrapper',
+    '```',
+    '- Always add `@functools.wraps(fn)` so the name and docstring survive.',
+    '- Use it as `@logged` right above `def add(...)`.',
+    '- Decorators that take arguments need one extra layer of nesting.',
+    '- Real uses: timing, caching, logging, auth checks.'
+  ].join('\n'),
+
+  generators: [
+    '**Generators refresher**',
+    '- A function that contains `yield` returns a generator: values are produced one at a time (lazy).',
+    '```python',
+    'def countdown(n):',
+    '    while n > 0:',
+    '        yield n',
+    '        n -= 1',
+    '```',
+    '- `next(gen)` pulls the next value; `StopIteration` ends it.',
+    '- Memory win: `sum(i * i for i in range(10**7))` never builds a huge list.',
+    '- An iterable has `__iter__`; an iterator has `__next__`.',
+    '- Use them for streaming, infinite sequences, and large files.'
+  ].join('\n'),
+
+  exceptions: [
+    '**Exceptions refresher**',
+    '- `try: ... except ValueError as e: ... else: ... finally: ...`',
+    '- `else` runs only if no exception; `finally` always runs (cleanup).',
+    "- Raise with `raise ValueError('bad input')`.",
+    '- Catch specific exceptions - a bare `except:` hides real bugs.',
+    '- Custom error: `class TooBig(Exception): pass`.',
+    '- Prefer EAFP (try it, catch the error) over LBYL (check first).'
+  ].join('\n'),
+
+  file_io: [
+    '**File I/O refresher**',
+    '- Always use `with` so the file closes even on an error:',
+    '```python',
+    "with open('data.txt', 'r', encoding='utf-8') as f:",
+    '    for line in f:',
+    '        print(line.rstrip())',
+    '```',
+    "- Modes: `'r'` read, `'w'` overwrite, `'a'` append, plus `'b'` for binary.",
+    '- `f.read()` all, `f.readline()` one line, `f.readlines()` a list of lines.',
+    '- `import csv` for CSV and `import json` with `json.load` / `json.dump` for JSON.'
+  ].join('\n'),
+
+  recursion: [
+    '**Recursion refresher**',
+    '- Two parts: a base case that stops, and a smaller recursive call.',
+    '```python',
+    'def fact(n):',
+    '    if n <= 1:',
+    '        return 1',
+    '    return n * fact(n - 1)',
+    '```',
+    '- Anything recursive can be a loop; recursion shines on trees, graphs, divide & conquer.',
+    '- Watch the depth limit (~1000) - deep recursion raises `RecursionError`.',
+    '- Naive Fibonacci is `O(2^n)`; memoize with `functools.lru_cache` or a dict for `O(n)`.'
+  ].join('\n'),
+
+  sorting_searching: [
+    '**Sorting & searching refresher**',
+    '- `sorted(items, key=..., reverse=True)` returns a new list; `items.sort()` sorts in place.',
+    "- Multi-key sort: `sorted(people, key=lambda p: (-p['age'], p['name']))`.",
+    '- Binary search needs a SORTED list: `bisect.bisect_left` / `bisect_right`.',
+    '- Complexity cheat sheet: list index `O(1)`, linear search `O(n)`, sort `O(n log n)`, dict/set lookup `O(1)` average.',
+    '- "Can we beat O(n^2)?" usually means sort first or trade memory for time with a dict or set.'
+  ].join('\n'),
+
+  interview_patterns: [
+    '**Interview patterns refresher**',
+    '- Two pointers: sort, then walk `left` and `right` inward (pair sums, palindromes).',
+    '- Sliding window: grow `right`, shrink `left` - longest/shortest substring problems.',
+    '- Hash map for counting and "seen it before": two-sum, anagrams, duplicates.',
+    '- Prefix sums: fast range-sum queries.',
+    '- Fast/slow pointers: cycle detection in linked lists.',
+    '- Say the brute force first, then name the optimisation and its Big-O out loud.'
+  ].join('\n'),
+
+  python_gotchas: [
+    '**Python gotchas refresher**',
+    '- Mutable default arguments are shared across calls:',
+    '```python',
+    'def add(item, bucket=[]):  # BUG',
+    '    bucket.append(item)',
+    '    return bucket',
+    '```',
+    '- Fix with `bucket=None` and `if bucket is None: bucket = []`.',
+    '- `is` vs `==` (identity vs equality).',
+    '- Shallow copy: `list(b)` copies the outer list only - use `copy.deepcopy` for nested data.',
+    '- Late binding in loops (see closures).',
+    '- Float math: `0.1 + 0.2 != 0.3` - use `math.isclose` or `Decimal`.',
+    '- Integer division with `/` always returns a float.'
+  ].join('\n')
+};
+
+/** Phrases that mean "I have forgotten basically everything - help me start". */
+const CRASH_COURSE_TRIGGERS = [
+  'forgot', 'forget', 'crash course', 'from scratch', 'where do i start',
+  'where to start', 'study plan', 'roadmap', 'everything', 'all topics',
+  'all the topics', 'beginner', 'lost', 'know nothing', 'nothing at all',
+  'start over', 'relearn', 'refresh everything', 'dont remember', "don't remember"
+];
+
+const CRASH_COURSE_REPLY = [
+  '**The six-week "I forgot everything" plan** 🐍',
+  '',
+  'Good news: you have not really forgotten it - it is just buried. Here is the fastest path back.',
+  '',
+  '**Week 1 - Fluency**',
+  '- basics: types, truthiness, `==` vs `is`',
+  '- strings: slicing, `split` / `join`, f-strings',
+  '- lists, dicts, sets: when to use which',
+  '',
+  '**Week 2 - Everyday Python**',
+  '- comprehensions (list / dict / set)',
+  '- functions, `*args` / `**kwargs`, closures',
+  '- exceptions: `try` / `except` / `else` / `finally`',
+  '',
+  '**Week 3 - The interview favourites**',
+  '- OOP: classes, `__init__`, `__repr__`, `super()`',
+  '- decorators: the wrapper pattern',
+  '- generators: `yield` and laziness',
+  '',
+  '**Week 4 - Algorithms**',
+  '- recursion + memoization',
+  '- sorting, searching and Big-O',
+  '- two pointers and sliding window',
+  '',
+  '**Week 5 - Polish**',
+  '- file I/O with `with open(...)`',
+  '- Python gotchas (mutable defaults, shallow copies)',
+  '',
+  '**Week 6 - Mock interviews**',
+  '- Use the Mock button: 5 questions, timed, no hints.',
+  '',
+  '**How to use this app with that plan**',
+  '- Pick one topic in the Topic dropdown, set difficulty to Easy, and solve 3 questions.',
+  '- Then switch the difficulty to Adaptive and let it choose for you.',
+  '- Stuck on a concept? Just ask me about it and I will give you a short refresher.',
+  '',
+  '---',
+  '_Offline cheat sheet. Add a free API key in `.env` for a tailored, conversational answer._'
+].join('\n');
+
+const OFFLINE_CHAT_FALLBACK = [
+  'I am in **offline mode** right now (no LLM API key), so I answer from a built-in cheat sheet. Ask me about any of these:',
+  '',
+  '- basics - strings - lists, dicts and sets',
+  '- comprehensions - functions and closures',
+  '- OOP - decorators - generators',
+  '- exceptions - file I/O - recursion',
+  '- sorting and searching - interview patterns - Python gotchas',
+  '',
+  'Try "explain decorators", or "I forgot all topics - where do I start?".',
+  '',
+  '---',
+  '_For full conversational answers, open `.env` and set `LLM_API_KEY` (free key at https://aistudio.google.com/apikey), then restart the server._'
+].join('\n');
+
+/** Keyword -> topic map used by the offline cheat sheet. */
+const OFFLINE_CHAT_KEYWORDS = {
+  basics: ['basics', 'types', 'truthy', 'falsy', 'mutable', 'immutable', 'operators', 'variable'],
+  strings: ['string', 'strings', 'slice', 'slicing', 'substring', 'palindrome', 'anagram', 'f-string', 'format'],
+  lists_dicts_sets: ['list', 'lists', 'tuple', 'tuples', 'dict', 'dicts', 'dictionary', 'set', 'sets', 'hashmap', 'hash map', 'counter', 'collections'],
+  comprehensions: ['comprehension', 'comprehensions', 'one-liner', 'one liner'],
+  functions_closures: ['function', 'functions', 'closure', 'closures', 'lambda', 'args', 'kwargs', 'scope', 'default argument', 'lru_cache', 'memoize', 'memoization'],
+  oop: ['oop', 'class', 'classes', 'object', 'objects', 'inheritance', 'inherit', 'dunder', 'init', 'self', 'method', 'methods', 'polymorphism'],
+  decorators: ['decorator', 'decorators', 'wrapper', 'wraps', 'functools'],
+  generators: ['generator', 'generators', 'yield', 'iterator', 'iterable', 'lazy', 'laziness'],
+  exceptions: ['exception', 'exceptions', 'error', 'errors', 'try', 'except', 'finally', 'raise', 'traceback'],
+  file_io: ['file', 'files', 'file io', 'open', 'read', 'write', 'csv', 'json file', 'with statement'],
+  recursion: ['recursion', 'recursive', 'base case', 'factorial', 'fibonacci', 'recursionerror'],
+  sorting_searching: ['sort', 'sorting', 'sorted', 'search', 'searching', 'binary search', 'bisect', 'complexity', 'big o', 'big-o', 'time complexity', 'space complexity'],
+  interview_patterns: ['two pointer', 'two pointers', 'two-pointer', 'sliding window', 'prefix sum', 'prefix sums', 'frequency', 'cycle detection', 'interview pattern', 'interview patterns'],
+  python_gotchas: ['gotcha', 'gotchas', 'mutable default', 'shallow copy', 'deepcopy', 'deep copy', 'late binding', 'floating point', 'rounding', 'is vs ==']
+};
+
+/**
+ * High-signal words route straight to a topic, so "how do I sort a list of
+ * dicts?" returns the sorting note instead of the lists note.
+ */
+const OFFLINE_CHAT_PRIORITY = [
+  { topic: 'sorting_searching', words: ['sort', 'sorted', 'sorting', 'binary search', 'bisect', 'big o', 'big-o', 'complexity'] },
+  { topic: 'python_gotchas', words: ['gotcha', 'gotchas', 'mutable default', 'shallow copy'] },
+  { topic: 'decorators', words: ['decorator', 'decorators', 'wrapper', 'wraps'] },
+  { topic: 'generators', words: ['generator', 'generators', 'yield'] },
+  { topic: 'recursion', words: ['recursion', 'recursive', 'base case'] },
+  { topic: 'comprehensions', words: ['comprehension', 'comprehensions'] }
+];
+
+/** Word-ish match so "str" does not fire inside "instruction". */
+function mentionsWord(text, word) {
+  if (word.includes(' ') || word.includes('-')) return text.includes(word);
+  const safe = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`\\b${safe}\\b`).test(text);
+}
+
+/** Score every topic and return the best-matching one (or null). */
+function matchOfflineTopic(text) {
+  // Highest-confidence phrases win outright.
+  for (const { topic, words } of OFFLINE_CHAT_PRIORITY) {
+    if (words.some((w) => mentionsWord(text, w))) return topic;
+  }
+
+  let best = null;
+  let bestScore = 0;
+  for (const topic of Object.keys(OFFLINE_CHAT_KEYWORDS)) {
+    let score = 0;
+    for (const word of OFFLINE_CHAT_KEYWORDS[topic]) {
+      if (mentionsWord(text, word)) score += word.includes(' ') ? 2 : 1;
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      best = topic;
+    }
+  }
+  return best;
+}
+
+/** Build a rule-based reply from the built-in cheat sheet. */
+function offlineChatReply(messages) {
+  const lastUser = [...messages].reverse().find((m) => m.role === 'user');
+  const text = (lastUser && lastUser.content ? lastUser.content : '').toLowerCase();
+
+  if (CRASH_COURSE_TRIGGERS.some((t) => text.includes(t))) {
+    return CRASH_COURSE_REPLY;
+  }
+  const topic = matchOfflineTopic(text);
+  if (topic && OFFLINE_CHAT_NOTES[topic]) {
+    return `${OFFLINE_CHAT_NOTES[topic]}\n\n---\n_Offline cheat sheet. Add a free API key in \`.env\` for a tailored answer._`;
+  }
+  return OFFLINE_CHAT_FALLBACK;
+}
+
+/** Send the conversation to the configured LLM, with light learner context. */
+async function chatWithLLM({ history, question, progress }) {
+  const weak = weakTopics(progress);
+  const context = [
+    question && question.statement
+      ? `The learner is currently working on this question:\n${describeQuestion(question)}`
+      : '',
+    weak.length ? `Their weakest topics so far: ${weak.join(', ')}.` : ''
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+
+  const system = context ? `${CHAT_SYSTEM}\n\nContext:\n${context}` : CHAT_SYSTEM;
+
+  const text = await callLLM({
+    system,
+    messages: history,
+    maxTokens: 900
+  });
+  return text.trim();
+}
+
+// ---------------------------------------------------------------------------
+// Concept explanations (POST /api/explain)
+// ---------------------------------------------------------------------------
+
+const EXPLAIN_SYSTEM =
+  'You are a warm, patient senior Python instructor coaching someone who is ' +
+  'relearning Python for interviews after a long break. You explain concepts ' +
+  'clearly and briefly, with tiny concrete examples. You always reply with ' +
+  'valid JSON and nothing else.';
+
+const EXPLAIN_SCHEMA_HINT = `Return ONLY a JSON object (no markdown fences, no commentary):
+{
+  "concepts": [
+    {
+      "title": "short concept name",
+      "explanation": "2-5 sentences in plain English explaining the concept as it applies to THIS question. You may use markdown: **bold**, inline \`code\`, and fenced \`\`\`python code blocks for a tiny example."
+    }
+  ]
+}
+Identify the 3 to 6 core Python concepts the learner needs to solve this exact question, ordered from most to least central. Do NOT reveal the full solution.`;
+
+/** Ask the LLM to explain the concepts behind a question. */
+async function explainWithLLM({ question }) {
+  const user =
+    `Here is a Python interview question:\n\n${describeQuestion(question)}\n\n` +
+    `List the core concepts needed and explain each briefly.\n\n${EXPLAIN_SCHEMA_HINT}`;
+
+  const text = await callLLM({
+    system: EXPLAIN_SYSTEM,
+    messages: [{ role: 'user', content: user }],
+    maxTokens: 1200
+  });
+
+  const parsed = extractJson(text);
+  if (!parsed || !Array.isArray(parsed.concepts) || !parsed.concepts.length) {
+    throw new Error('Could not parse concept explanations from the model response');
+  }
+  const concepts = parsed.concepts
+    .filter((c) => c && c.title && c.explanation)
+    .map((c) => ({ title: String(c.title), explanation: String(c.explanation) }));
+  if (!concepts.length) throw new Error('No concepts returned by the model');
+  return concepts;
+}
+
+/** Tidy a topic id into a readable label (offline fallback). */
+function topicLabel(t) {
+  return String(t || 'General')
+    .split('_')
+    .map((w) => (w ? w.charAt(0).toUpperCase() + w.slice(1) : w))
+    .join(' ');
+}
+
+/** Offline fallback: serve the built-in topic cheat-sheet as one explanation. */
+function offlineExplain({ question }) {
+  const note = OFFLINE_CHAT_NOTES[question.topic] || OFFLINE_CHAT_FALLBACK;
+  return [{ title: `${topicLabel(question.topic)} refresher`, explanation: note }];
+}
+
+// ---------------------------------------------------------------------------
 // Express app
 // ---------------------------------------------------------------------------
 const app = express();
@@ -763,6 +1195,73 @@ app.post('/api/validate', async (req, res) => {
     progress,
     level: computeLevel(progress.xp)
   });
+});
+
+/**
+ * POST /api/chat
+ * body: { messages: [{role, content}], question? }
+ * Free-form tutoring. Falls back to a built-in cheat sheet when no key is set.
+ * Returns: { reply, source }
+ */
+app.post('/api/chat', async (req, res) => {
+  const body = req.body || {};
+  const history = (Array.isArray(body.messages) ? body.messages : [])
+    .filter((m) => m && typeof m.content === 'string' && (m.role === 'user' || m.role === 'assistant'))
+    .slice(-12)
+    .map((m) => ({ role: m.role, content: m.content.slice(0, 4000) }));
+
+  if (!history.length) {
+    return res.status(400).json({ error: 'A message is required.' });
+  }
+
+  // Only pass the parts of the question the tutor needs (never the solution).
+  const q = body.question && typeof body.question === 'object'
+    ? {
+        title: body.question.title,
+        topic: body.question.topic,
+        difficulty: body.question.difficulty,
+        statement: body.question.statement,
+        functionName: body.question.functionName
+      }
+    : null;
+
+  if (!llmConfig().enabled) {
+    return res.json({ reply: offlineChatReply(history), source: 'offline', reason: 'NO_API_KEY' });
+  }
+
+  try {
+    const progress = loadProgress();
+    const reply = await chatWithLLM({ history, question: q, progress });
+    res.json({ reply, source: 'ai' });
+  } catch (err) {
+    console.warn('[chat] AI chat failed, using the offline cheat sheet:', err.message);
+    res.json({ reply: offlineChatReply(history), source: 'offline', reason: err.message });
+  }
+});
+
+/**
+ * POST /api/explain
+ * body: { question }
+ * Returns a short explanation of each concept the question needs.
+ * Falls back to the built-in topic cheat sheet when no key is set.
+ */
+app.post('/api/explain', async (req, res) => {
+  const question = req.body && req.body.question;
+  if (!question || typeof question !== 'object' || !question.topic) {
+    return res.status(400).json({ error: 'A question is required.' });
+  }
+
+  if (!llmConfig().enabled) {
+    return res.json({ concepts: offlineExplain({ question }), source: 'offline', reason: 'NO_API_KEY' });
+  }
+
+  try {
+    const concepts = await explainWithLLM({ question });
+    res.json({ concepts, source: 'ai' });
+  } catch (err) {
+    console.warn('[explain] AI explanation failed, using offline cheat sheet:', err.message);
+    res.json({ concepts: offlineExplain({ question }), source: 'offline', reason: err.message });
+  }
 });
 
 /**

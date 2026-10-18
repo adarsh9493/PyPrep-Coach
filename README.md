@@ -20,7 +20,10 @@ and (optionally) run your code for real against test cases.
 - **Mock interview mode** — timed, 5 questions, no hints, with a report card at the end.
 - **Gamification** — XP, levels, a daily streak, an accumulating *Topics to brush up* list, and confetti (toggleable).
 - **Progress dashboard** — accuracy by topic, questions solved, weak areas, and mock-interview history.
-- **Dark mode by default** with a light-mode toggle.
+- **Light mode by default** with a dark-mode toggle (a clean, low-contrast palette that is easy on the eyes).
+- **Concept explanations for every question** — each question ships a collapsible **"Concepts in this question"** panel that explains the 3-6 ideas you actually need, written for someone who has not touched Python in a while (AI-coached, or from the built-in cheat sheet offline).
+- **Ask-your-coach bar** — a prominent **"Ask question"** box under the topic/difficulty selectors. Type any question ("Explain decorators simply") and hit **Ask question**; it opens the coach chat and answers inline.
+- **Ask-your-coach chat** — a free-form chat panel for any concept question ("I forgot all the topics"). Answers render with code blocks and lists, and it works offline from a built-in cheat sheet.
 - **Works offline too** — with no API key it falls back to 5 bundled questions and a rule-based tutor.
 
 ---
@@ -69,7 +72,7 @@ That's it — Gemini's free tier is the default. Prefer something else? Change
 
 | `LLM_PROVIDER` | Get a free key | Default model |
 | --- | --- | --- |
-| `gemini` *(default)* | <https://aistudio.google.com/apikey> | `gemini-2.0-flash` |
+| `gemini` *(default)* | <https://aistudio.google.com/apikey> | `gemini-flash-latest` |
 | `groq` | <https://console.groq.com/keys> | `llama-3.3-70b-versatile` |
 | `openrouter` | <https://openrouter.ai/keys> | `meta-llama/llama-3.3-70b-instruct:free` |
 | `ollama` | none — runs locally | `llama3.2` |
@@ -153,6 +156,9 @@ PyPrep-Coach/
 | Reveal a nudge | **💡 Show hint** |
 | Reveal the reference solution | **👀 Show solution** (disabled during mock interviews) |
 | Mock interview | **⏱ Mock** in the top bar |
+| Understand a question's concepts | **🧠 Concepts in this question** panel under the statement (click to expand/collapse) |
+| Ask a quick question | Type in the **💬 Ask question** box under the topic selectors, then press **Ask question** |
+| Ask the tutor anything | **💬 Chat** in the top bar (Esc closes it) |
 | Dashboard | **📊 Dashboard** |
 | Toggle light/dark | **🌙 / ☀️** in the top bar |
 | Turn confetti on/off | **🎉** in the top bar |
@@ -167,7 +173,7 @@ All optional, in `.env`:
 | --- | --- | --- |
 | `LLM_PROVIDER` | `gemini` | One of `gemini`, `groq`, `openrouter`, `ollama`. |
 | `LLM_API_KEY` | _(none)_ | Your free provider key. Not needed for `ollama`. Without it, offline mode is used. |
-| `LLM_MODEL` | _(per provider)_ | Override the model, e.g. `gemini-2.5-flash`. |
+| `LLM_MODEL` | _(per provider)_ | Override the model, e.g. `gemini-flash-latest`. |
 | `LLM_BASE_URL` | _(per provider)_ | Override the API base URL (self-hosted / custom). |
 | `PORT` | `3000` | Port the local server listens on. |
 
@@ -187,7 +193,12 @@ makes outbound calls to your chosen provider.
 - **"Execution unavailable"** — Pyodide is also CDN-loaded. Grading falls back to
   the AI/rule-based tutor when it can't run.
 - **"Offline tutor" badge on feedback** — the API key is missing or the model
-  call failed; check `.env` and your network.
+  call failed; check `.env` and your network. The chat still answers from a
+  built-in cheat sheet (and says "Offline cheat-sheet mode" at the top).
+- **AI calls fall back to bundled questions** — free-tier models regularly hit
+  429/503 "high demand" or get retired. The backend retries and tries a chain
+  of fallback models automatically; set `LLM_MODEL` in `.env` to pin a model
+  that responds right now (e.g. `gemini-3-flash-preview`).
 - **Port already in use** — set `PORT=3001` in `.env` and reopen the matching URL.
 
 ---

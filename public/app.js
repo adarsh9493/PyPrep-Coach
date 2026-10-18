@@ -68,6 +68,17 @@ const state = {
     difficulty: 'Medium',
     remaining: MOCK_SECONDS,
     timer: null
+  },
+  chat: {
+    open: false,
+    busy: false,
+    messages: []
+  },
+  concept: {
+    open: false,
+    loading: false,
+    loadedFor: null, // question id whose concepts are already fetched
+    data: null
   }
 };
 
@@ -339,6 +350,9 @@ function renderQuestion(q) {
   $('hintBox').classList.add('hidden');
   $('solutionBox').classList.add('hidden');
 
+  // Reset + load concept explanations for this question.
+  resetConcepts(q);
+
   // Pre-fill the editor with the starter code.
   setCode(q.starterCode);
 
@@ -360,6 +374,104 @@ function resetFeedback() {
   content.classList.add('hidden');
   content.innerHTML = '';
   $('execStatus').textContent = '';
+}
+
+// ---------------------------------------------------------------------------
+// Concept explanations (collapsible, under the question)
+// ---------------------------------------------------------------------------
+function conceptSourceLabel(source) {
+  return source === 'ai' ? 'AI coach' : 'cheat sheet';
+}
+
+/** Reset the explainer for a freshly loaded question and fetch its concepts. */
+function resetConcepts(q) {
+  state.concept.open = false;
+  state.concept.loading = false;
+  state.concept.loadedFor = q ? q.id : null;
+  state.concept.data = null;
+
+  const explainer = $('conceptExplainer');
+  const body = $('conceptBody');
+  const src = $('conceptSource');
+  explainer.classList.remove('open');
+  $('conceptToggle').setAttribute('aria-expanded', 'false');
+  src.textContent = '';
+  body.innerHTML = '';
+
+  if (q) loadConcepts(q);
+}
+
+/** Fetch explanations for the question's concepts (cached per question id). */
+async function loadConcepts(q) {
+  if (!q || !q.id || state.concept.loading) return;
+  // Already have data for this question.
+  if (state.concept.loadedFor === q.id && state.concept.data) {
+    renderConcepts();
+    return;
+  }
+
+  state.concept.loading = true;
+  const body = $('conceptBody');
+  body.innerHTML = '<div class="concept-loading"><span class="spinner"></span>Working out the concepts this question needs…</div>';
+
+  try {
+    const data = await api('/api/explain', {
+      method: 'POST',
+      body: JSON.stringify({
+        question: {
+          id: q.id,
+          title: q.title,
+          topic: q.topic,
+          difficulty: q.difficulty,
+          statement: q.statement,
+          functionName: q.functionName,
+          examples: q.examples,
+          testCases: q.testCases
+        }
+      })
+    });
+    state.concept.data = data.concepts || [];
+    state.concept.loadedFor = q.id;
+    $('conceptSource').textContent = conceptSourceLabel(data.source);
+    renderConcepts();
+  } catch (err) {
+    state.concept.data = [
+      { title: 'Could not load explanations', explanation: `Something went wrong: ${err.message}. You can still ask the coach in chat.` }
+    ];
+    renderConcepts();
+  } finally {
+    state.concept.loading = false;
+  }
+}
+
+function renderConcepts() {
+  const body = $('conceptBody');
+  const items = state.concept.data || [];
+  body.innerHTML = items
+    .map(
+      (c) => `<div class="concept-item">
+        <h5>▸ ${esc(c.title)}</h5>
+        <div class="concept-text">${mdToHtml(c.explanation)}</div>
+      </div>`
+    )
+    .join('');
+
+  // Auto-open the first time concepts arrive so the coaching is visible.
+  if (!state.concept.open && items.length) {
+    state.concept.open = true;
+    $('conceptExplainer').classList.add('open');
+    $('conceptToggle').setAttribute('aria-expanded', 'true');
+  }
+}
+
+function toggleConcepts() {
+  state.concept.open = !state.concept.open;
+  $('conceptExplainer').classList.toggle('open', state.concept.open);
+  $('conceptToggle').setAttribute('aria-expanded', String(state.concept.open));
+  // If the user opens it and we haven't fetched yet, fetch now.
+  if (state.concept.open && !state.concept.data && state.question) {
+    loadConcepts(state.question);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -753,7 +865,7 @@ async function finishMock(timedOut) {
 // Theme
 // ---------------------------------------------------------------------------
 function currentTheme() {
-  return document.documentElement.getAttribute('data-theme') || 'dark';
+  return document.documentElement.getAttribute('data-theme') || 'light';
 }
 
 function applyTheme(theme) {
@@ -827,6 +939,248 @@ function launchConfetti() {
 }
 
 // ---------------------------------------------------------------------------
+// Free-form tutor chat
+// ---------------------------------------------------------------------------
+const CHAT_STORE_KEY = 'pyprep.chat.v1';
+
+const CHAT_WELCOME = [
+  "Hey! I'm your Python coach. 🐍",
+  '',
+  "If it feels like you've forgotten everything, that is completely normal - it comes back fast once you touch the topics again.",
+  '',
+  'Ask me anything, for example:',
+  '- "I forgot all the topics - where do I start?"',
+  '- "Explain decorators like I am new"',
+  '- "What is the difference between a list and a tuple?"',
+  '',
+  "I can also see the question you're working on, so I can nudge you without spoiling it."
+].join('\n');
+
+const CHAT_SUGGESTIONS = [
+  'I forgot all the topics - give me a crash course',
+  'Explain decorators simply',
+  'List vs tuple vs dict vs set?',
+  'What Big-O do interviewers expect?',
+  'Give me a study plan for this week'
+];
+
+/** Restore the conversation from localStorage (or start a fresh one). */
+function chatLoad() {
+  try {
+    const raw = localStorage.getItem(CHAT_STORE_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    if (Array.isArray(parsed)) {
+      state.chat.messages = parsed.filter((m) => m && typeof m.content === 'string');
+    }
+  } catch (_) {
+    /* ignore corrupt storage */
+  }
+  if (!state.chat.messages.length) {
+    state.chat.messages = [{ role: 'assistant', content: CHAT_WELCOME }];
+  }
+}
+
+function chatSave() {
+  try {
+    localStorage.setItem(CHAT_STORE_KEY, JSON.stringify(state.chat.messages.slice(-40)));
+  } catch (_) {
+    /* ignore storage limits */
+  }
+}
+
+function setChatSub(text) {
+  const el = $('chatSub');
+  if (el) el.textContent = text;
+}
+
+// --- Tiny, safe markdown subset (bold, italics, code, lists, rules) --------
+function inlineMd(s) {
+  return s
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/(^|\s)_([^_]+)_(?=\s|$)/g, '$1<em>$2</em>');
+}
+
+function mdBlocks(text) {
+  const lines = esc(text).split('\n');
+  let out = '';
+  let list = null;
+  const closeList = () => {
+    if (list) {
+      out += `</${list}>`;
+      list = null;
+    }
+  };
+  for (const raw of lines) {
+    const line = raw.replace(/\s+$/, '');
+    if (!line.trim()) {
+      closeList();
+      continue;
+    }
+    let m;
+    if ((m = line.match(/^\s*[-*]\s+(.+)$/))) {
+      if (list !== 'ul') {
+        closeList();
+        out += '<ul>';
+        list = 'ul';
+      }
+      out += `<li>${inlineMd(m[1])}</li>`;
+    } else if ((m = line.match(/^\s*\d+[.)]\s+(.+)$/))) {
+      if (list !== 'ol') {
+        closeList();
+        out += '<ol>';
+        list = 'ol';
+      }
+      out += `<li>${inlineMd(m[1])}</li>`;
+    } else if (line.trim() === '---') {
+      closeList();
+      out += '<hr>';
+    } else {
+      closeList();
+      out += `<p>${inlineMd(line)}</p>`;
+    }
+  }
+  closeList();
+  return out;
+}
+
+/** Render the assistant's markdown-ish reply into safe HTML. */
+function mdToHtml(md) {
+  const parts = String(md == null ? '' : md).split('```');
+  let html = '';
+  parts.forEach((part, i) => {
+    if (i % 2 === 1) {
+      // Fenced code block; drop an optional language tag on the first line.
+      const body = part.replace(/^[a-zA-Z0-9_+-]*\n/, '').replace(/\n$/, '');
+      html += `<pre class="chat-code">${esc(body)}</pre>`;
+    } else {
+      html += mdBlocks(part);
+    }
+  });
+  return html || '<p></p>';
+}
+
+function renderChat() {
+  const body = $('chatBody');
+  if (!body) return;
+
+  body.innerHTML = state.chat.messages
+    .map((m) =>
+      m.role === 'user'
+        ? `<div class="chat-msg user"><div class="bubble">${esc(m.content)}</div></div>`
+        : `<div class="chat-msg assistant"><span class="chat-avatar">🧑🏫</span><div class="bubble">${mdToHtml(m.content)}</div></div>`
+    )
+    .join('');
+
+  if (state.chat.busy) {
+    body.insertAdjacentHTML(
+      'beforeend',
+      '<div class="chat-msg assistant"><span class="chat-avatar">🧑🏫</span>' +
+        '<div class="bubble"><span class="spinner"></span>Thinking…</div></div>'
+    );
+  }
+
+  renderChatSuggestions();
+  body.scrollTop = body.scrollHeight;
+}
+
+function renderChatSuggestions() {
+  const box = $('chatSuggest');
+  if (!box) return;
+  const hasUser = state.chat.messages.some((m) => m.role === 'user');
+  if (hasUser || state.chat.busy) {
+    box.innerHTML = '';
+    return;
+  }
+  box.innerHTML = CHAT_SUGGESTIONS.map(
+    (s) => `<button type="button" class="suggest-chip" data-prompt="${esc(s)}">${esc(s)}</button>`
+  ).join('');
+}
+
+function openChat() {
+  state.chat.open = true;
+  $('chatPanel').classList.remove('hidden');
+  renderChat();
+  // Only steal focus on a real pointer/keyboard interaction, not on load.
+  setTimeout(() => {
+    const input = $('chatInput');
+    if (input && state.chat.open) input.focus();
+  }, 60);
+}
+
+function closeChat() {
+  state.chat.open = false;
+  $('chatPanel').classList.add('hidden');
+}
+
+function toggleChat() {
+  if (state.chat.open) closeChat();
+  else openChat();
+}
+
+function newChat() {
+  state.chat.messages = [{ role: 'assistant', content: CHAT_WELCOME }];
+  state.chat.busy = false;
+  chatSave();
+  renderChat();
+  setChatSub('Explain anything, any topic');
+}
+
+function autoGrowChatInput(el) {
+  el.style.height = 'auto';
+  el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
+}
+
+/** Send a message to the tutor and render the reply. */
+async function sendChat(text) {
+  const content = String(text == null ? '' : text).trim();
+  if (!content || state.chat.busy) return;
+
+  state.chat.messages.push({ role: 'user', content });
+  state.chat.busy = true;
+  chatSave();
+  renderChat();
+
+  const input = $('chatInput');
+  if (input) {
+    input.value = '';
+    autoGrowChatInput(input);
+  }
+
+  // Only send context the tutor needs - never the reference solution.
+  const questionContext = state.question
+    ? {
+        title: state.question.title,
+        topic: state.question.topic,
+        difficulty: state.question.difficulty,
+        statement: state.question.statement,
+        functionName: state.question.functionName
+      }
+    : null;
+
+  try {
+    const data = await api('/api/chat', {
+      method: 'POST',
+      body: JSON.stringify({
+        messages: state.chat.messages.slice(-12),
+        question: questionContext
+      })
+    });
+    state.chat.messages.push({ role: 'assistant', content: data.reply || '(no reply)' });
+    setChatSub(data.source === 'ai' ? 'AI tutor connected' : 'Offline cheat-sheet mode');
+  } catch (err) {
+    state.chat.messages.push({
+      role: 'assistant',
+      content: `Hmm, I could not answer that: ${err.message}`
+    });
+  } finally {
+    state.chat.busy = false;
+    chatSave();
+    renderChat();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Bootstrapping & event wiring
 // ---------------------------------------------------------------------------
 async function loadProgress() {
@@ -835,7 +1189,7 @@ async function loadProgress() {
     state.progress = data.progress;
     state.level = data.level;
     renderProgressHeader();
-    applyTheme((data.progress.settings && data.progress.settings.theme) || 'dark');
+    applyTheme((data.progress.settings && data.progress.settings.theme) || 'light');
   } catch (err) {
     console.warn('Could not load progress:', err);
   }
@@ -925,6 +1279,46 @@ function wireEvents() {
   });
   $('mockQuit').addEventListener('click', () => finishMock(false));
 
+  // --- Tutor chat ---
+  $('chatBtn').addEventListener('click', toggleChat);
+  $('chatClose').addEventListener('click', closeChat);
+  $('chatNewChat').addEventListener('click', newChat);
+  $('conceptToggle').addEventListener('click', toggleConcepts);
+  // The prominent "Ask question" bar: open the chat and send the message.
+  $('askForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const input = $('askInput');
+    const text = input.value.trim();
+    if (!text) {
+      toast('Type a question first, then hit Ask question.');
+      input.focus();
+      return;
+    }
+    openChat();
+    sendChat(text);
+    input.value = '';
+    input.blur();
+  });
+  $('chatForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    sendChat($('chatInput').value);
+  });
+  $('chatInput').addEventListener('input', (e) => autoGrowChatInput(e.target));
+  $('chatInput').addEventListener('keydown', (e) => {
+    // Enter sends, Shift+Enter adds a new line.
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendChat(e.target.value);
+    }
+  });
+  $('chatSuggest').addEventListener('click', (e) => {
+    const chip = e.target.closest('.suggest-chip');
+    if (chip) sendChat(chip.dataset.prompt);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && state.chat.open) closeChat();
+  });
+
   // Keyboard shortcuts that work even without Monaco.
   document.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
@@ -935,6 +1329,7 @@ function wireEvents() {
 }
 
 async function init() {
+  chatLoad();
   wireEvents();
   await loadProgress();
   await loadTopics();
